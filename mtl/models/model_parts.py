@@ -63,7 +63,7 @@ class Encoder(torch.nn.Module):
             model = fn_name(**encoder_kwargs)
         else:
             # special case due to prohibited dilation in the original BasicBlock
-            pretrained = encoder_kwargs.pop('pretrained', False)
+            pretrained = encoder_kwargs.pop('pretrained', True)
             progress = encoder_kwargs.pop('progress', True)
             model = resnet._resnet(
                 name, BasicBlockWithDilation, _basic_block_layers[name], pretrained, progress, **encoder_kwargs
@@ -151,15 +151,34 @@ class ASPPpart(torch.nn.Sequential):
 
 
 class ASPP(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, rates=(3, 6, 9)):
+    def __init__(self, in_channels, out_channels, rates=(6, 12, 18)):
         super().__init__()
         # TODO: Implement ASPP properly instead of the following
+        #1x1 Convolutional Layer
+        self.conv1x1 = torch.nn.Conv2d(in_channels=out_channels * 5,
+                                  out_channels=out_channels, kernel_size=1, dilation=1)
+        #Atrous layers
+        self.branches = torch.nn.ModuleList([torch.nn.Conv2d(in_channels, out_channels,
+                                                        kernel_size=(3, 3), stride=1, padding=rate, dilation=rate)
+                                             for rate in rates])
+        self.branches.append(torch.nn.Conv2d(in_channels=in_channels,
+                                        out_channels=out_channels, kernel_size=(1, 1)))
+        #Polling layer
+        self.gip_unit = torch.nn.Sequential(
+            torch.nn.AdaptiveAvgPool2d((1, 1)),
+            torch.nn.Conv2d(in_channels, out_channels, 1, 1, 0, 1))
         self.conv_out = ASPPpart(in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
 
     def forward(self, x):
         # TODO: Implement ASPP properly instead of the following
-        out = self.conv_out(x)
-        return out
+        #out = self.conv_out(x)
+        output = [branch(x) for branch in self.branches]
+        gip_output = self.gip_unit(x)
+        gip_output_upsampled = gip_output.expand(
+            gip_output.shape[0], gip_output.shape[1],
+            output[0].shape[2], output[0].shape[3])
+        output.append(gip_output_upsampled)
+        return self.conv1x1(torch.cat(output, dim=1))
 
 
 class SelfAttention(torch.nn.Module):
