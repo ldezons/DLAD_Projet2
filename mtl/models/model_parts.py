@@ -155,18 +155,18 @@ class ASPP(torch.nn.Module):
         super().__init__()
         # TODO: Implement ASPP properly instead of the following
         #1x1 Convolutional Layer
-        self.conv1x1 = torch.nn.Conv2d(in_channels=out_channels * 5,
+        self.conv1x1 = ASPPpart(in_channels=out_channels * 5,
                                   out_channels=out_channels, kernel_size=1, dilation=1)
         #Atrous layers
-        self.branches = torch.nn.ModuleList([torch.nn.Conv2d(in_channels, out_channels,
+        self.branches = torch.nn.ModuleList([ASPPpart(in_channels, out_channels,
                                                         kernel_size=(3, 3), stride=1, padding=rate, dilation=rate)
                                              for rate in rates])
-        self.branches.append(torch.nn.Conv2d(in_channels=in_channels,
+        self.branches.append(ASPPpart(in_channels=in_channels,
                                         out_channels=out_channels, kernel_size=(1, 1)))
         #Polling layer
         self.gip_unit = torch.nn.Sequential(
             torch.nn.AdaptiveAvgPool2d((1, 1)),
-            torch.nn.Conv2d(in_channels, out_channels, 1, 1, 0, 1))
+            ASPPpart(in_channels, out_channels, 1, 1, 0, 1))
         self.conv_out = ASPPpart(in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
 
     def forward(self, x):
