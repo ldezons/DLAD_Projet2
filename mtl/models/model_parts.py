@@ -156,13 +156,13 @@ class ASPP(torch.nn.Module):
         # TODO: Implement ASPP properly instead of the following
         #1x1 Convolutional Layer
         self.conv1x1 = ASPPpart(in_channels=out_channels * 5,
-                                  out_channels=out_channels, kernel_size=1,stride=1, padding=0, dilation=1)
+                                  out_channels=out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
         #Atrous layers
         self.branches = torch.nn.ModuleList([ASPPpart(in_channels, out_channels,
                                                         kernel_size=(3, 3), stride=1, padding=rate, dilation=rate)
                                              for rate in rates])
         self.branches.append(ASPPpart(in_channels=in_channels,
-                                        out_channels=out_channels, kernel_size=(1, 1), stride=1, padding=0, dilatation=1))
+                                        out_channels=out_channels, kernel_size=(1, 1), stride=1, padding=0, dilation=1))
         #Polling layer
         self.gip_unit = torch.nn.Sequential(
             torch.nn.AdaptiveAvgPool2d((1, 1)),
