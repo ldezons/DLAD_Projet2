@@ -153,32 +153,34 @@ class ASPPpart(torch.nn.Sequential):
 class ASPP(torch.nn.Module):
     def __init__(self, in_channels, out_channels, rates=(6, 12, 18)):
         super().__init__()
-        # TODO: Implement ASPP properly instead of the following
-        #1x1 Convolutional Layer
-        self.conv1x1 = ASPPpart(in_channels=out_channels * 5,
-                                  out_channels=out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
-        #Atrous layers
-        self.branches = torch.nn.ModuleList([ASPPpart(in_channels, out_channels,
-                                                        kernel_size=(3, 3), stride=1, padding=rate, dilation=rate)
-                                             for rate in rates])
-        self.branches.append(ASPPpart(in_channels=in_channels,
-                                        out_channels=out_channels, kernel_size=(1, 1), stride=1, padding=0, dilation=1))
-        #Polling layer
-        self.gip_unit = torch.nn.Sequential(
-            torch.nn.AdaptiveAvgPool2d((1, 1)),
-            ASPPpart(in_channels, out_channels, 1, 1, 0, 1))
-        self.conv_out = ASPPpart(in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
+        self.conv1x1 = ASPPpart(in_channels, out_channels, kernel_size=(1, 1), stride=1, padding=0, dilation=1)
+        self.conv3x3_rate6 = ASPPpart(in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=rates[0],
+                                      dilation=rates[0])
+        self.conv3x3_rate12 = ASPPpart(in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=rates[1],
+                                       dilation=rates[1])
+        self.conv3x3_rate18 = ASPPpart(in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=rates[2],
+                                       dilation=rates[2])
+        # Pooling Has to be followed by a convolution as we want to extract features
+        self.out_pooling = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d((1, 1)),
+                                               ASPPpart(in_channels, out_channels, kernel_size=1, stride=1, padding=0,
+                                                        dilation=1))
+
+        self.conv_final = ASPPpart(out_channels * 5, out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
 
     def forward(self, x):
         # TODO: Implement ASPP properly instead of the following
-        #out = self.conv_out(x)
-        output = [branch(x) for branch in self.branches]
-        gip_output = self.gip_unit(x)
-        gip_output_upsampled = gip_output.expand(
-            gip_output.shape[0], gip_output.shape[1],
-            output[0].shape[2], output[0].shape[3])
-        output.append(gip_output_upsampled)
-        return self.conv1x1(torch.cat(output, dim=1))
+        output = []
+        output.append(self.conv3x3_rate6(x))
+        output.append(self.conv3x3_rate12(x))
+        output.append(self.conv3x3_rate18(x))
+        output.append(self.conv1x1(x))
+        # Due to a shape error, we had to rescale the avg output
+        avg = self.out_pooling(x)
+        avg = F.interpolate(avg, size=output[0].shape[2:], mode='bilinear', align_corners=False)
+        # Output
+        output.append(avg)
+        # Last Convulational layer
+        return self.conv_final(torch.cat(output, dim=1))
 
 
 class SelfAttention(torch.nn.Module):
