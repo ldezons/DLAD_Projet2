@@ -24,9 +24,16 @@ cd /home/ubuntu/code/
 python -m mtl.scripts.train \
   --log_dir /home/ubuntu/results/ \
   --dataset_root /home/ubuntu/miniscapes/ \
-  --name Default \
-  --optimizer sgd \
-  --optimizer_lr 0.01
+  --name Run_DORN\
+  --optimizer adam \
+  --optimizer_lr 0.0001\
+  --batch_size 4\
+  --num_epochs 16\
+  --model_name 'DORN_model'\
+  #--loss_weight_semseg 0.95\
+  #--loss_weight_depth 0.05\
+
+
   # ... you can pass further arguments as specified in utils/config.py
   # DO NOT FORGET ADDING BACKSLASHES for additional flags (except the last one)
 

@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
+from typing import Type, Any,  Union, List
 import torchvision.models.resnet as resnet
+from torchvision.models.utils import load_state_dict_from_url
 
 
 class BasicBlockWithDilation(torch.nn.Module):
@@ -21,6 +23,7 @@ class BasicBlockWithDilation(torch.nn.Module):
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
+        self.SE = SqueezeAndExcitation(planes)
 
     def forward(self, x):
         identity = x
@@ -29,6 +32,7 @@ class BasicBlockWithDilation(torch.nn.Module):
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
+        out = self.SE(out)
         if self.downsample is not None:
             identity = self.downsample(x)
         out += identity
@@ -63,9 +67,9 @@ class Encoder(torch.nn.Module):
             model = fn_name(**encoder_kwargs)
         else:
             # special case due to prohibited dilation in the original BasicBlock
-            pretrained = encoder_kwargs.pop('pretrained', True)
+            pretrained = encoder_kwargs.pop('pretrained', False)
             progress = encoder_kwargs.pop('progress', True)
-            model = resnet._resnet(
+            model = _resnet_(
                 name, BasicBlockWithDilation, _basic_block_layers[name], pretrained, progress, **encoder_kwargs
             )
         replace_stride_with_dilation = encoder_kwargs.get('replace_stride_with_dilation', (False, False, False))
@@ -122,6 +126,42 @@ class DecoderDeeplabV3p(torch.nn.Module):
     def __init__(self, bottleneck_ch, skip_4x_ch, num_out_ch):
         super(DecoderDeeplabV3p, self).__init__()
 
+        int_ch = 256
+        skip_4x_out_ch = 48
+        self.conv_skip = ASPPpart(in_channels=skip_4x_ch, out_channels=skip_4x_out_ch, kernel_size=1)
+        self.features_conv = torch.nn.Sequential(
+            ASPPpart(in_channels=skip_4x_out_ch + bottleneck_ch, out_channels=int_ch, kernel_size=3, padding=1),
+            ASPPpart(in_channels=int_ch, out_channels=int_ch, kernel_size=3, padding=1)
+        )
+        self.pred_conv = torch.nn.Sequential(
+            ASPPpart(in_channels=skip_4x_out_ch + bottleneck_ch, out_channels=int_ch, kernel_size=3, padding=1),
+            torch.nn.Conv2d(in_channels=int_ch, out_channels=num_out_ch, kernel_size=3, padding=1)
+        )
+
+    def forward(self, features_bottleneck, features_skip_4x):
+        """
+        DeepLabV3+ style decoder
+        :param features_bottleneck: bottleneck features of scale > 4
+        :param features_skip_4x: features of encoder of scale == 4
+        :return: features with 256 channels and the final tensor of predictions
+        """
+        low_features = self.conv_skip(features_skip_4x)
+        features_4x = F.interpolate(features_bottleneck, size=features_skip_4x.shape[2:],
+                                    mode='bilinear', align_corners=False)
+        features_4x = torch.cat([features_4x, low_features], dim=1)
+        # Get the prediction from the concatenated features , we do not use barch normalization and ReLu as we are supposed to make predictions
+        predictions_4x = self.pred_conv(features_4x)
+        # Get the upsampled features, here we need to use barch normalization and ReLu and upsample the feature
+        features_4x = self.features_conv(features_4x)
+        features_4x = F.interpolate(features_4x, size=features_skip_4x.shape[2:],
+                                    mode='bilinear', align_corners=False)
+
+        return predictions_4x, features_4x
+
+
+class ClassicalDecoder(torch.nn.Module):
+    def __init__(self, bottleneck_ch, num_out_ch):
+        super(ClassicalDecoder, self).__init__()
         # TODO: Implement a proper decoder with skip connections instead of the following
         self.features_to_predictions = torch.nn.Conv2d(bottleneck_ch, num_out_ch, kernel_size=1, stride=1)
 
@@ -138,11 +178,12 @@ class DecoderDeeplabV3p(torch.nn.Module):
             features_bottleneck, size=features_skip_4x.shape[2:], mode='bilinear', align_corners=False
         )
         predictions_4x = self.features_to_predictions(features_4x)
-        return predictions_4x, features_4x
+        return predictions_4x
 
 
 class ASPPpart(torch.nn.Sequential):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1):
+
         super().__init__(
             torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, bias=False),
             torch.nn.BatchNorm2d(out_channels),
@@ -153,34 +194,34 @@ class ASPPpart(torch.nn.Sequential):
 class ASPP(torch.nn.Module):
     def __init__(self, in_channels, out_channels, rates=(6, 12, 18)):
         super().__init__()
-        self.conv1x1 = ASPPpart(in_channels, out_channels, kernel_size=(1, 1), stride=1, padding=0, dilation=1)
-        self.conv3x3_rate6 = ASPPpart(in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=rates[0],
+        # ASPP implementation as shown in the figure
+        self.conv1x1 = ASPPpart(in_channels, out_channels, kernel_size=1)
+        self.conv3x3_rate6 = ASPPpart(in_channels, out_channels, kernel_size=3, stride=1, padding=rates[0],
                                       dilation=rates[0])
-        self.conv3x3_rate12 = ASPPpart(in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=rates[1],
+        self.conv3x3_rate12 = ASPPpart(in_channels, out_channels, kernel_size=3, stride=1, padding=rates[1],
                                        dilation=rates[1])
-        self.conv3x3_rate18 = ASPPpart(in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=rates[2],
+        self.conv3x3_rate18 = ASPPpart(in_channels, out_channels, kernel_size=3, stride=1, padding=rates[2],
                                        dilation=rates[2])
-        # Pooling Has to be followed by a convolution as we want to extract features
-        self.out_pooling = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d((1, 1)),
-                                               ASPPpart(in_channels, out_channels, kernel_size=1, stride=1, padding=0,
-                                                        dilation=1))
+        #Pooling Has to be followed by a convolution as we want to extract features
+        self.out_pooling = torch.nn.Sequential(torch.nn.AdaptiveAvgPool2d(1),
+                                               ASPPpart(in_channels, out_channels, kernel_size=1))
 
-        self.conv_final = ASPPpart(out_channels * 5, out_channels, kernel_size=1, stride=1, padding=0, dilation=1)
+        self.conv_final = ASPPpart(out_channels * 5, out_channels, kernel_size=1)
+
 
     def forward(self, x):
-        # TODO: Implement ASPP properly instead of the following
-        output = []
+        #Create a list with all the modules as they are computed in parallel
+        output = [self.conv1x1(x)]
         output.append(self.conv3x3_rate6(x))
         output.append(self.conv3x3_rate12(x))
         output.append(self.conv3x3_rate18(x))
-        output.append(self.conv1x1(x))
-        # Due to a shape error, we had to rescale the avg output
+        #Due to a shape error, we had to rescale the avg output
         avg = self.out_pooling(x)
         avg = F.interpolate(avg, size=output[0].shape[2:], mode='bilinear', align_corners=False)
-        # Output
+        #Output
         output.append(avg)
-        # Last Convulational layer
-        return self.conv_final(torch.cat(output, dim=1))
+        #Last Convulational layer
+        return self.conv_final(torch.cat(output,dim=1))
 
 
 class SelfAttention(torch.nn.Module):
@@ -201,6 +242,7 @@ class SqueezeAndExcitation(torch.nn.Module):
     """
     Squeeze and excitation module as explained in https://arxiv.org/pdf/1709.01507.pdf
     """
+
     def __init__(self, channels, r=16):
         super(SqueezeAndExcitation, self).__init__()
         self.transform = torch.nn.Sequential(
@@ -215,3 +257,44 @@ class SqueezeAndExcitation(torch.nn.Module):
         squeezed = torch.mean(x, dim=(2, 3)).reshape(N, C)
         squeezed = self.transform(squeezed).reshape(N, C, 1, 1)
         return x * squeezed
+
+class OrdinalRegression(torch.nn.Module):
+    def __init__(self):
+        super(OrdinalRegression, self).__init__()
+    def forward(self, x):
+        N, C, H, W = x.size()
+        ord_num = C // 16
+        #implementation according to the paper
+        A = x[:, ::2, :, :]
+        B = x[:, 1::2, :, :]
+        A = A.reshape(N, 1, ord_num * H * W)
+        B = B.reshape(N, 1, ord_num * H * W)
+        A = A.unsqueeze(dim=1)
+        B = B.unsqueeze(dim=1)
+        concat_feats = torch.cat((A, B), dim=1)
+
+        if self.training:
+           prob = F.log_softmax(concat_feats, dim=1)
+           ord_prob = x.clone()
+           ord_prob[:, 0::2, :, :] = prob[:, 0, :, :, :]
+           ord_prob[:, 1::2, :, :] = prob[:, 1, :, :, :]
+           return ord_prob
+
+        ord_prob = F.softmax(concat_feats, dim=1)[:, 0, ::]
+        ord_label = torch.sum((ord_prob > 0.5), dim=1).reshape((N, 1, H, W))
+        return ord_prob, ord_label
+
+
+def _resnet_(
+    arch: str,
+    block: Type[Union[resnet.BasicBlock, resnet.Bottleneck]],
+    layers: List[int],
+    pretrained: bool,
+    progress: bool,
+    **kwargs: Any,
+) -> resnet.ResNet:
+    model = resnet.ResNet(block, layers, **kwargs)
+    if pretrained:
+        state_dict = load_state_dict_from_url(resnet.model_urls[arch], progress=progress)
+        model.load_state_dict(state_dict, strict=False)
+    return model
